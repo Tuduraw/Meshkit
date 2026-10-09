@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "meshkit"
-version = "0.4.1"
+version = "0.5.0"
 description = "Blender-free low-poly modelling toolkit for AI agents: closed-mesh primitives, modern aircraft / armour / warship kits, texture detail passes, checks, software previews, OBJ/glTF I/O, CLI and MCP server"
 requires-python = ">=3.9"
 dependencies = ["numpy>=1.22", "Pillow>=9"]

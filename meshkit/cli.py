@@ -1,8 +1,10 @@
 """Command line:  python -m meshkit <command> ...
 
   run SCRIPT.py [-o DIR] [--formats obj,glb] [--views ...] [--mode ...] [--wire] [--no-contacts] [--strict]
+        [--seethrough]
         Execute a modelling script (it defines build() returning a Model, or sets a global `model`),
-        then check it, export it and render a preview sheet. Prints a JSON report.
+        then check it, export it and render a preview sheet. Prints a JSON report. --seethrough adds the
+        see-through check (report["seethrough"], <name>_seethrough.png).
   render FILE [-o PNG] [--views iso,left,top] [--mode texture|parts|solid|tags|orientation|xray] [--wire]
         [--size 520x340] [--cols 3] [--texture PNG] [--axes native|blender] [--parts a,b] [--skip a,b] [--zoom 1]
   check FILE [--no-contacts] [--texture PNG] [--axes ...]       closed-mesh / contact report (JSON)
@@ -11,6 +13,9 @@
   diff A B                                                       compare two models (sizes, parts, tris)
   silhouette FILE --view side|top|front -o PNG [--ref DRAWING.png --ref-box x0,y0,x1,y1]
         orthographic outline in model units (overlay on a reference drawing for checking proportions)
+  seethrough FILE [--texture PNG] [--axes ...] [--directions 32] [--res 360] [--skip a,b] [-o PNG]
+        pixels where the back of a surface is in view (a hole, an opening with nothing behind it, a face that
+        shares the texels of an opening...), by part and place (JSON); -o: the worst views, magenta / cyan
 """
 import argparse
 import json
@@ -61,7 +66,7 @@ def _json(o):
 
 
 def run_script(script, out_dir=None, formats=("obj", "glb"), views=None, mode="texture", wire=False, contacts=True,
-               size=(520, 340), name=None, render=True):
+               size=(520, 340), name=None, render=True, seethrough=False):
     """Execute a modelling script and return (model, report). Used by the CLI and the MCP server."""
     from . import check, io_obj, io_gltf, view
     from .geom import Model
@@ -109,6 +114,14 @@ def run_script(script, out_dir=None, formats=("obj", "glb"), views=None, mode="t
             kw["views"] = views
         view.sheet(model, W=size[0], H=size[1], mode=mode, wire=wire, **kw).save(p)
         rep["outputs"]["preview"] = p
+    if seethrough:
+        from . import seethrough as st
+        sr = st.check(model)
+        rep["seethrough"] = st.summary(sr)
+        if sr["worst"]:
+            p = os.path.join(out_dir, name + "_seethrough.png")
+            st.sheet(model, sr).save(p)
+            rep["outputs"]["seethrough"] = p
     rep["seconds"] = round(time.time() - t0, 2)
     return model, rep
 
@@ -122,6 +135,7 @@ def main(argv=None):
     a.add_argument("--wire", action="store_true"); a.add_argument("--no-contacts", action="store_true")
     a.add_argument("--size", default="520x340"); a.add_argument("--name"); a.add_argument("--strict", action="store_true")
     a.add_argument("--no-render", action="store_true")
+    a.add_argument("--seethrough", action="store_true", help="also run the see-through check (adds ~10-30 s)")
 
     r = sub.add_parser("render"); r.add_argument("file"); r.add_argument("-o", "--out")
     r.add_argument("--views", default="iso,iso_rear,left,top,front,iso_below"); r.add_argument("--mode", default="texture")
@@ -143,12 +157,16 @@ def main(argv=None):
     s.add_argument("-o", "--out", required=True); s.add_argument("--ref"); s.add_argument("--ref-box")
     s.add_argument("--axes", default="native")
 
+    t = sub.add_parser("seethrough"); t.add_argument("file"); t.add_argument("--texture"); t.add_argument("--axes", default="native")
+    t.add_argument("--directions", type=int, default=32); t.add_argument("--res", type=int, default=360)
+    t.add_argument("--skip"); t.add_argument("-o", "--out")
+
     ns = ap.parse_args(argv)
     from . import check, view, io_obj, io_gltf
 
     if ns.cmd == "run":
         _, rep = run_script(ns.script, ns.out, _views(ns.formats), _views(ns.views) if ns.views else None, ns.mode,
-                            ns.wire, not ns.no_contacts, _size(ns.size), ns.name, not ns.no_render)
+                            ns.wire, not ns.no_contacts, _size(ns.size), ns.name, not ns.no_render, ns.seethrough)
         print(_json(rep))
         if ns.strict and not rep["ok"]:
             sys.exit(1)
@@ -204,6 +222,15 @@ def main(argv=None):
                 dv = float(max(np.abs(la - lb).max(), np.abs(ha - hb).max()))
                 if ta != tb or dv > 1e-4:
                     out["changed_parts"][p] = {"tris": [ta, tb], "bbox_shift": round(dv, 4)}
+        print(_json(out))
+    elif ns.cmd == "seethrough":
+        from . import seethrough
+        m = _load(ns.file, ns.texture, ns.axes)
+        rep = seethrough.check(m, ns.directions, ns.res, skip=set(_views(ns.skip)) if ns.skip else ())
+        out = seethrough.summary(rep)
+        if ns.out and rep["worst"]:
+            seethrough.sheet(m, rep).save(ns.out)
+            out["image"] = ns.out
         print(_json(out))
     elif ns.cmd == "silhouette":
         from . import silhouette

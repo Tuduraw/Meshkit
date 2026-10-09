@@ -14,6 +14,7 @@ Tools
   check        closed-shell / contact report of an OBJ / GLB
   info         sizes, parts, triangle counts of an OBJ / GLB
   convert      OBJ <-> GLB
+  seethrough   where the back of a surface is in view (holes, openings with nothing behind them) - JSON + image
   list_files   files in the workspace
 """
 import base64
@@ -46,6 +47,7 @@ TOOLS = [
          "size": {"type": "string", "description": "per-view size WxH, default 520x340"},
          "formats": {"type": "string", "description": "default obj,glb"},
          "contacts": {"type": "boolean", "description": "run the floating-part test (default true)"},
+         "seethrough": {"type": "boolean", "description": "also run the see-through check (default false, adds 10-30 s)"},
          "timeout": {"type": "number", "description": "seconds, default 300"}},
          "required": ["name"]}},
     {"name": "render", "description": "Render a preview sheet of an OBJ/GLB file (path absolute or relative to the workspace). "
@@ -67,6 +69,17 @@ TOOLS = [
     {"name": "convert", "description": "Convert between OBJ and GLB.",
      "inputSchema": {"type": "object", "properties": {"src": {"type": "string"}, "dst": {"type": "string"},
                                                        "texture": {"type": "string"}}, "required": ["src", "dst"]}},
+    {"name": "seethrough",
+     "description": "See-through check of an OBJ/GLB with its texture: pixels where a viewer looks at the back of a "
+                    "surface (a hole, an opening cut with texture alpha 0 that has nothing behind it, a face sharing "
+                    "the texels of an opening), counted over 64 views, grouped by part with model coordinates, plus "
+                    "an image of the worst views (magenta = open, cyan = through glass). Target: open 0-3 px.",
+     "inputSchema": {"type": "object", "properties": {
+         "file": {"type": "string"}, "texture": {"type": "string"}, "axes": {"type": "string"},
+         "directions": {"type": "integer", "description": "view directions (each seen far and near), default 32"},
+         "res": {"type": "integer", "description": "pixels per view side, default 360"},
+         "skip": {"type": "string", "description": "parts to leave out (comma list), e.g. tracks drawn by the engine"}},
+         "required": ["file"]}},
     {"name": "list_files", "description": "List files in the workspace (or a sub folder).",
      "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}}},
 ]
@@ -121,6 +134,8 @@ def call(name, a):
             args.append("--wire")
         if a.get("contacts") is False:
             args.append("--no-contacts")
+        if a.get("seethrough"):
+            args.append("--seethrough")
         code, so, se = _cli(args, timeout=a.get("timeout", 300))
         if code != 0:
             return [_text(f"script failed (exit {code})\n--- stdout ---\n{so[-6000:]}\n--- stderr ---\n{se[-8000:]}")], True
@@ -131,6 +146,9 @@ def call(name, a):
         prev = os.path.join(out_dir, stem + "_preview.png")
         if os.path.exists(prev):
             content.append(_img(prev))
+        stp = os.path.join(out_dir, stem + "_seethrough.png")
+        if a.get("seethrough") and os.path.exists(stp) and '"seethrough"' in rep_txt:
+            content.append(_img(stp))
         return content, False
     if name == "render":
         out = os.path.join(WS, "out", "render_" + os.path.splitext(os.path.basename(a["file"]))[0] + ".png")
@@ -154,6 +172,24 @@ def call(name, a):
         if not so.strip():
             return [_text(se[-8000:])], True
         return [_text(so)], False
+    if name == "seethrough":
+        out = os.path.join(WS, "out", "seethrough_" + os.path.splitext(os.path.basename(a["file"]))[0] + ".png")
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        if os.path.exists(out):
+            os.remove(out)
+        args = ["seethrough", _p(a["file"]), "--axes", a.get("axes", "native"), "-o", out,
+                "--directions", str(a.get("directions", 32)), "--res", str(a.get("res", 360))]
+        if a.get("texture"):
+            args += ["--texture", _p(a["texture"])]
+        if a.get("skip"):
+            args += ["--skip", a["skip"]]
+        code, so, se = _cli(args, timeout=a.get("timeout", 600))
+        if code != 0 or not so.strip():
+            return [_text(se[-8000:] or so)], True
+        content = [_text(so)]
+        if os.path.exists(out):
+            content.append(_img(out))
+        return content, False
     if name == "convert":
         args = ["convert", _p(a["src"]), _p(a["dst"])]
         if a.get("texture"):

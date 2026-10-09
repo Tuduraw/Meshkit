@@ -16,6 +16,7 @@ ww2gen（vehicleaddonww2の生成スクリプト）で使ってきた汎用部�
 | プレビュー | ソフトウェア描画（背面カリング、面単位の陰影、ガラスのディザ）。透視の斜め視点、正投影の六面図、表示モード6種、ワイヤーフレーム、参照点の印 |
 | 入出力 | OBJ（Blender 4.5の書き出しと同じ並び）、glb/glTF（読み書き。パーツごとのノード、原点＝回転中心、テクスチャ埋め込み）、Blender座標（Z上）との変換 |
 | 現代兵器用キット（0.3.0） | 直線の台形翼（公表値から翼弦を算出）、ノズルを内包する双発機の後部胴体、コックピットのくぼみ、引き込み脚の自動収納と脚収納部の膨らみ、戦車の車体側面形（傾斜角から）・足回り・履帯経路・張り出し付き砲塔・搭載モジュール、現代艦の傾斜壁の上部構造と艤装、墨入れなどテクスチャの書き込み、めり込み・公表寸法・標識位置の検査。手引きは `meshkit/AI_GUIDE.md` の6章、例は `examples/modern/` |
+| 透けの検査と開口の修正（0.5.0） | 64視点から、面の裏側（＝背景）が見える画素を部品と位置ごとに数える `seethrough`（CLI・MCP・`run --seethrough`）。開口（不透明度0の穴）とテクセルを共有して誤って開く／開かない面を、`texture_model` が自動で専用の領域に移す（`fix_shared`、既定で有効）。機体の下に吊るされた部品を探す `hanging_shells`（側面を下面色で塗るため）。手引きは `meshkit/AI_GUIDE.md` の8章 |
 | ロボット用キット（0.4.0、0.4.1で追加） | 4つのデザイン言語の断面（丸い五角形、管と格子桁、稜線のある六角形、鋳造の超楕円）、斜材付きの桁と支柱で浮かせた別体の装甲板（0.4.1）、装甲板・スカート、関節の回転（変形の姿勢づくり）、充填率・正面幅/側面奥行き・脚の寸法の数値化。手引きは `meshkit/AI_GUIDE.md` の7章、例は `examples/mech/concept_legs.py` |
 | 窓口 | コマンドライン（`python -m meshkit ...`）と、MCPサーバー（`python -m meshkit.mcp_server`） |
 
@@ -71,7 +72,10 @@ python -m meshkit check model.glb
 python -m meshkit info model.obj
 python -m meshkit convert model.obj model.glb --texture model.png
 python -m meshkit diff old.obj new.obj
+python -m meshkit seethrough model.obj --texture model.png -o seethrough.png
 ```
+
+`seethrough` は、面の裏側が見える画素（`open`）とガラス越しに見える画素（`glass`）の数、その部品と位置をJSONで出し、`-o` で最も悪い視点の画像（裏面＝マゼンタ、ガラス越し＝シアン）を書き出します。目標は `open` が0〜3画素です。
 
 ### MCPサーバーとして使う（Claude Desktop / Claude Code）
 
@@ -87,7 +91,7 @@ python -m meshkit diff old.obj new.obj
 }
 ```
 
-ツール：`guide`（作業ガイド）、`run_script`（コードを保存して実行し、検査結果とプレビュー画像を返す）、`render`、`check`、`info`、`convert`、`list_files`。
+ツール：`guide`（作業ガイド）、`run_script`（コードを保存して実行し、検査結果とプレビュー画像を返す。`seethrough=true` で透けの検査も行う）、`render`、`check`、`info`、`convert`、`seethrough`（透けの検査）、`list_files`。
 スクリプトは別プロセスで実行するので、スクリプトの誤りや無限ループでサーバーが止まることはありません（既定のタイムアウト300秒）。
 
 クラウド環境など、MCPを登録できない場所では、コマンドラインを実行してプレビュー画像を読むだけで同じ作業ができます。
@@ -95,6 +99,7 @@ python -m meshkit diff old.obj new.obj
 ### AI向けの手引き
 
 `meshkit/AI_GUIDE.md` に、座標系、API、作業の流れ、守るべき規則（閉じたメッシュ、食い込ませてつなぐ、凸の面、背面カリング前提）をまとめています。MCPの `guide` ツールも同じ内容を返します。
+開口（操縦席・窓）の作り方、透けの原因と検査、上面色と下面色の塗り分けは8章です。
 
 ## ww2gen での使い方
 
@@ -138,6 +143,7 @@ meshkit/
   meshkit/
     geom.py        形状（Shell / Part / Model、プリミティブ）
     check.py       メッシュ検査と report()
+    seethrough.py  透けの検査（面の裏側が見える画素。0.5.0）
     attach.py      接触判定（浮き部品）
     texture.py     投影アトラスと texture_model()
     render.py      ソフトウェア描画
@@ -149,6 +155,7 @@ meshkit/
     armor.py       戦車の車体・足回り・履帯経路・砲塔・搭載モジュール（0.3.0）
     ship.py        現代艦の船体・上部構造・艤装（0.3.0）
     detail.py      墨入れ・汚し・パネルライン・番号などテクスチャの書き込み（0.3.0）
+    mech.py        ロボット用キット（0.4.0）
     io_obj.py      OBJ 読み書き
     io_gltf.py     glb / glTF 読み書き
     cli.py         コマンドライン
@@ -163,6 +170,11 @@ meshkit/
 
 ## 更新履歴
 
+- 0.5.0（2026-10-09）：透けの検査と、開口のテクセル共有の修正を追加しました。vehicleaddonww2 の航空機59機の修正（主翼付け根などで面の裏側が見えていた件と、機体下部の部品の塗り分け）で得た知見です。動作確認キットの134項目は完全一致のままです（確認用モデルは開口を使っていないため、出力は変わりません）。
+  - 追加したモジュール：`seethrough`（`check`、`sheet`、`summary`）。CLI の `seethrough` と `run --seethrough`、MCP の `seethrough` ツールと `run_script` の `seethrough` を追加
+  - `texture`：`texture_model(fix_shared=True)`、`Atlas.hijacked()`・`solo`・`fmap`・`face_mask()`・`Region.px_to_ab()`、`hanging_shells()`
+  - `tests/selftest.py` に検査を追加。`AI_GUIDE.md` に8章「透け（裏面の露出）と塗り分け」を追加
+  - vehicleaddonww2 の `tools/ww2gen/lib/texture.py` にも同じ修正が入っています
 - 0.3.0（2026-10-06）：現代兵器用キットを追加しました。現代パック（vehicleaddonmodern）の制作で見つかった、WW2機向け手法の弱点への対策です。既存の関数の動作は変えていません（動作確認キットの134項目は完全一致のまま）。
   - 追加したモジュール：`planform`（直線の台形翼）、`fuselage`（胴体・ノズル・コックピット）、`gear`（引き込み脚）、`armor`（戦車）、`ship`（現代艦）、`detail`（テクスチャの書き込み）
   - `check` に追加した関数：`penetration`（めり込み）、`compare_size`（公表寸法との照合）、`marking_spot`（標識を描く場所の平らさ）

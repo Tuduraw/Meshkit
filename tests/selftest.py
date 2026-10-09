@@ -82,6 +82,7 @@ def main():
     assert check.report(fl)["contact_groups"] == 2
     print("floating detection ok")
     modern_kits()
+    seethrough_and_shared_texels()
     print("ALL OK", tmp)
 
 
@@ -121,6 +122,48 @@ def modern_kits():
             assert m.props["_tail_in_nozzles"]["tail"] == 0, m.props["_tail_in_nozzles"]
         print(name, "ok", rep["summary"]["tris"], "tris")
     print("modern kits ok")
+
+
+def seethrough_and_shared_texels():
+    """v0.5: the see-through check finds an opening with nothing behind it, texture_model gives a face that shares
+    the texels of an opening texels of its own, hanging_shells finds parts under an airframe."""
+    from meshkit import seethrough
+    from meshkit.texture import texture_model, hanging_shells
+    hole = lambda X, Y, Z: (np.abs(X) < 0.3) & (np.abs(Z) < 0.3) & (Y > 0.99)
+    cut = lambda atlas, model: atlas.cut_alpha(hole, tags=["skin"])
+    m = mk.Model("box"); m.add("a", mk.box(0, 0.5, 0, 1, 1, 1, tag="skin"))
+    texture_model(m, (64, 64))
+    assert seethrough.check(m, 8, 120)["open"] == 0
+    texture_model(m, (64, 64), paint=cut)            # a hole in the lid, nothing under it: the inside shows
+    r = seethrough.check(m, 8, 120)
+    assert r["open"] > 0 and r["where"][0]["part"] == "a", seethrough.summary(r)
+    # a long plate whose end lies under a thin lid with a hole through it (both skins of the lid, y > 0.98): the
+    # plate shares the lid's texels in the plan view (too little of it is hidden to get a chart of its own), so the
+    # hole would open the plate too, and in the view from below the plate owns the texels, so the lid's lower skin
+    # would stay closed - unless texture_model charts those faces apart
+    hole2 = lambda X, Y, Z: (np.abs(X) < 0.3) & (np.abs(Z) < 0.3) & (Y > 0.98)
+    cut = lambda atlas, model: atlas.cut_alpha(hole2, tags=["skin"])
+    s = mk.Model("shared")
+    s.add("lid", mk.box(0, 1.0, 0, 1.0, 0.02, 1.0, tag="skin"))
+    s.add("plate", mk.box(4.55, 0.5, 0, 10.0, 0.02, 0.9, tag="skin"))
+    at = texture_model(s, (256, 256), paint=cut, fix_shared=False)
+    assert ("plate", 0, 2) in at.hijacked(), at.hijacked()          # the plate's top face samples the hole
+    bad = seethrough.check(s, 16, 160)["open"]
+    at = texture_model(s, (256, 256), paint=cut)
+    good = seethrough.check(s, 16, 160)["open"]
+    reg = at.regions["top#solo#plate#0"]
+    assert not at.hijacked() and at.alpha[reg.y0:reg.y0 + reg.h, reg.x0:reg.x0 + reg.w].min() > 254, at.solo
+    # (what is left looks into the 2 cm thick lid through the edge of its hole: a hole cut by texture only has
+    # no walls - real openings need a frame, a tub or a liner behind them, see AI_GUIDE 8.2)
+    assert bad > 2 * good, (bad, good)
+    # hanging_shells: a float under the body is one, a fin on top is not
+    h = mk.Model("h")
+    h.add("fuselage", mk.box(0, 2.0, 0, 1.0, 1.0, 6.0, tag="body"))
+    h.add("float", mk.box(0, 0.4, 0, 0.6, 0.5, 4.0, tag="body"))
+    h.add("fin", mk.box(0, 2.9, -2.5, 0.1, 1.0, 0.8, tag="body"))
+    hs = hanging_shells(h, tags=("body",))
+    assert ("float", 0) in hs and ("fin", 0) not in hs, hs
+    print("see-through check / shared texels / hanging shells ok", {"open before": bad, "after": good})
 
 
 if __name__ == "__main__":

@@ -10,6 +10,18 @@ Faces are first rasterised into a per-view 'tag map' (painter's algorithm, outer
 surface last) so the painting stage knows which surface type owns every texel, then
 base colours, camouflage, insignia, panel lines and weathering are painted on top as
 functions of real model coordinates.
+
+A face hidden behind another surface in its view shares that surface's texels (unless
+assign_layers gives it a layer of its own). That is harmless for colour, but not for
+openings cut with cut_alpha (alpha 0 = a hole in the mod): the cut is decided at the
+owning surface's point, so a hidden face can be opened where it should be closed, or
+stay closed where it should be open. texture_model(fix_shared=True) finds such faces
+(Atlas.hijacked), gives them texels of their own (Atlas.solo) and builds the atlas again.
+Check the result with meshkit.seethrough. (v0.5)
+
+hanging_shells() finds parts hanging under an airframe (floats, spats, fairings, gear
+doors...); Atlas.face_mask() selects their texels so their sides can take the lower
+colour of an upper/lower scheme.
 """
 import math
 import numpy as np
@@ -115,6 +127,14 @@ class Region:
         a, b = self.ab(P)
         return np.stack(self.ab_to_px(a, b), 1)
 
+    def px_to_ab(self, x, y):
+        """Inverse of ab_to_px (texel coordinates -> model coordinates in this view)."""
+        fa = (np.asarray(x, float) - self.x0) / self.w
+        fb = (np.asarray(y, float) - self.y0) / self.h
+        if self.base == "top" and not self.rot:
+            fa = 1.0 - fa
+        return self.a0 + fa * (self.a1 - self.a0), self.b1 - fb * (self.b1 - self.b0)
+
     def grid(self):
         """Model-space (a, b) coordinates of every texel centre in this region."""
         xs = np.arange(self.w) + 0.5; ys = np.arange(self.h) + 0.5
@@ -146,6 +166,8 @@ class Atlas:
                                     # take the texels of what lies behind them (the skin under a canopy)
         self.split_sides = False    # True: the right (-X) sides get texels of their own (asymmetric
                                     # markings such as numbers / lettering read correctly on both sides)
+        self.solo = {}              # (part, shell, face) -> chart name: faces charted apart from the shared
+                                    # projections (set from hijacked() and the atlas built again)
 
     # -------------------------------------------------------------- setup
     def tid(self, tag):
@@ -172,6 +194,8 @@ class Atlas:
                             kind = "side#R"
                         if tag in self.glass_tags:
                             kind = kind.split("#")[0] + "#" + ("liner" if tag == "liner" else "glass")
+                        if (pname, si, fi) in self.solo:
+                            kind = kind + "#solo#" + self.solo[(pname, si, fi)]
                     self.faces.append((pname, si, fi, kind, tag, Q))
 
     def assign_layers(self, keep=0.9, res=700, max_samples=240):
@@ -349,7 +373,9 @@ class Atlas:
         self.tagmap = np.zeros((H, W), np.int32)
         self.pmap = np.zeros((H, W, 3), np.float32)
         self.outer = np.full((H, W), -np.inf, np.float32)
-        for (pname, si, fi, kind, tag, Q) in self.faces:
+        self.fmap = np.full((H, W), -1, np.int32)      # index (in self.faces) of the face owning each texel
+        self.cut_log = []                               # holes cut by cut_alpha (fn, tags, kinds) - see hijacked()
+        for fidx, (pname, si, fi, kind, tag, Q) in enumerate(self.faces):
             if kind == "flat":
                 continue
             r = self.regions[kind]
@@ -365,12 +391,12 @@ class Atlas:
             tid = self.tid(tag)
             for k in range(1, len(Q) - 1):
                 idx = [0, k, k + 1]
-                self._tri(px[idx], Q[idx], depth[idx], tid)
+                self._tri(px[idx], Q[idx], depth[idx], tid, fidx=fidx)
         self.img = np.zeros((H, W, 3), np.float32)
         self.alpha = np.full((H, W), 255.0, np.float32)
         self.painted = np.zeros((H, W), bool)
 
-    def _tri(self, p, Q, d, tid, tol=0.75):
+    def _tri(self, p, Q, d, tid, tol=0.75, fidx=-1):
         x0 = max(int(np.floor(p[:, 0].min() - 1)), 0); x1 = min(int(np.ceil(p[:, 0].max() + 1)), self.W - 1)
         y0 = max(int(np.floor(p[:, 1].min() - 1)), 0); y1 = min(int(np.ceil(p[:, 1].max() + 1)), self.H - 1)
         if x1 < x0 or y1 < y0:
@@ -383,7 +409,7 @@ class Atlas:
             for (qx, qy) in p:
                 ix, iy = int(qx), int(qy)
                 if 0 <= ix < self.W and 0 <= iy < self.H and self.tagmap[iy, ix] == 0:
-                    self.tagmap[iy, ix] = tid; self.pmap[iy, ix] = Q.mean(0)
+                    self.tagmap[iy, ix] = tid; self.pmap[iy, ix] = Q.mean(0); self.fmap[iy, ix] = fidx
             return
         sgn = 1.0 if area2 > 0 else -1.0
         # signed distances (px) to each edge, positive inside
@@ -404,6 +430,7 @@ class Atlas:
             return
         sub_o[win] = dd[win]
         self.tagmap[y0:y1 + 1, x0:x1 + 1][win] = tid
+        self.fmap[y0:y1 + 1, x0:x1 + 1][win] = fidx
         P = (w0[..., None] * Q[0] + w1[..., None] * Q[1] + w2[..., None] * Q[2])
         self.pmap[y0:y1 + 1, x0:x1 + 1][win] = P[win]
 
@@ -438,6 +465,83 @@ class Atlas:
                 out[(pname, si, fi)] = [(p[0] / self.W, 1.0 - p[1] / self.H) for p in px]
         return out
 
+    def hijacked(self, tol=None):
+        """Faces whose openings (texels cut to alpha 0 by cut_alpha) come out wrong because they share texels.
+
+        Where projections overlap, a face lying behind another surface shares that surface's texels (assign_layers
+        moves a face apart only when a good part of it is hidden), and a cut is decided at the owning surface's
+        point. So a hidden face can be opened where it should not be - the wing root top skin under the cockpit,
+        seen through the slit at the trailing edge; a compartment floor under its windows - or stay closed where
+        it should be open - a cockpit's side skin in the side view behind a wing tip, leaving a strip of skin whose
+        back face shows across the cockpit. Returns {(part, shell, face): chart name} for every face that samples
+        a texel owned by another surface (more than `tol` off the face's plane) whose cut state differs from the
+        face's own at that texel; set it as `solo` and build the atlas again, and those faces get texels of their
+        own (painted and cut at their true position)."""
+        al = getattr(self, "alpha", None)
+        if al is None or not getattr(self, "cut_log", None):
+            return {}
+        if tol is None:
+            tol = max(0.03, 2.0 / max(self.scale, 1e-3))
+        cut = al < 0.5
+        out = {}
+        for fidx, (pname, si, fi, kind, tag, Q) in enumerate(self.faces):
+            if kind == "flat":
+                continue
+            base = kind.split("#")[0]
+            cuts = [fn for fn, tags, kinds in self.cut_log if (tags is None or tag in tags) and base in kinds]
+            if not cuts:
+                continue
+            r = self.regions[kind]
+            px = r.to_px(Q)
+            pts = []
+            for k in range(1, len(Q) - 1):
+                a, b, c = px[0], px[k], px[k + 1]
+                n = int(np.ceil(max(np.linalg.norm(b - a), np.linalg.norm(c - a)) / 0.3)) + 1
+                i, j = np.meshgrid(np.arange(n + 1), np.arange(n + 1))
+                m = i + j <= n
+                u = i[m] / n; v = j[m] / n
+                pts.append(a + u[:, None] * (b - a) + v[:, None] * (c - a))
+            pts = np.vstack(pts)
+            tx = np.clip(np.floor(pts[:, 0]).astype(np.int64), 0, self.W - 1)
+            ty = np.clip(np.floor(pts[:, 1]).astype(np.int64), 0, self.H - 1)
+            ids = np.unique(ty * self.W + tx)
+            ty, tx = ids // self.W, ids % self.W
+            own = self.fmap[ty, tx]
+            sel = (own != fidx) & (own >= 0)
+            if not sel.any():
+                continue
+            ty, tx = ty[sel], tx[sel]
+            nrm = face_normal(Q)
+            P = self.pmap[ty, tx].astype(float)
+            if base in ("side", "front"):       # mirrored charts: both sides share the texel by design
+                ax = 0 if base == "side" else 2
+                P[:, ax] = np.abs(P[:, ax]) * (1.0 if Q[:, ax].mean() >= 0 else -1.0)
+            far = np.abs((P - Q[0]) @ nrm) > tol
+            if not far.any():
+                continue
+            ty, tx = ty[far], tx[far]
+            # this face's own point at each of those texel centres (on its plane, along the chart's view axis)
+            A, B = r.px_to_ab(tx + 0.5, ty + 0.5)
+            X = np.zeros((len(A), 3))
+            if base in ("top", "bottom"):
+                ax_ = 1
+                ia, ib = (2, 0) if r.rot else (0, 2)
+                X[:, ia] = A; X[:, ib] = B
+            elif base == "side":
+                ax_ = 0; X[:, 2] = A; X[:, 1] = B
+            else:
+                ax_ = 2; X[:, 0] = A; X[:, 1] = B
+            if abs(nrm[ax_]) < 1e-6:
+                continue
+            oth = [k for k in range(3) if k != ax_]
+            X[:, ax_] = Q[0, ax_] - ((X[:, oth] - Q[0, oth]) @ nrm[oth]) / nrm[ax_]
+            mine = np.zeros(len(X), bool)
+            for fn in cuts:
+                mine |= np.asarray(fn(X[:, 0], X[:, 1], X[:, 2]), bool)
+            if np.any(mine != cut[ty, tx]):
+                out[(pname, si, fi)] = f"{pname}#{si}"
+        return out
+
     # -------------------------------------------------------------- painting
     def mask(self, tags=None, kinds=KINDS):
         m = np.zeros((self.H, self.W), bool)
@@ -449,6 +553,11 @@ class Atlas:
             mm = (sub > 0) if ids is None else np.isin(sub, ids)
             m[r.y0:r.y0 + r.h, r.x0:r.x0 + r.w] |= mm
         return m
+
+    def face_mask(self, shells, tags=None, kinds=KINDS):
+        """Texels owned by the faces of the given shells {(part, shell index)} (in charts of `kinds`, with `tags`)."""
+        sel = np.array([(f[0], f[1]) in shells for f in self.faces] + [False])
+        return self.mask(tags, kinds) & sel[self.fmap]
 
     def paint_alpha(self, fn, tags=None, kinds=KINDS):
         """Per-texel opacity (0..255) for translucent surfaces (canopy glass...). fn(X, Y, Z) -> alpha
@@ -466,6 +575,8 @@ class Atlas:
     def cut_alpha(self, fn, tags=None, kinds=KINDS, value=0.0):
         """Set the opacity of the texels where fn(X, Y, Z) is True to `value` (default 0: openings such as a cockpit
         cut into the fuselage skin under the canopy); every other texel keeps its opacity."""
+        if value < 0.5 and hasattr(self, "cut_log"):
+            self.cut_log.append((fn, None if tags is None else tuple(tags), tuple(kinds)))
         m = self.mask(tags, kinds)
         if not m.any():
             return 0
@@ -613,7 +724,7 @@ def tag_color(tag):
 
 
 def texture_model(model, size=(512, 512), colors=None, flat=None, paint=None, glass_tags=(), split_sides=False,
-                  cell=8, margin=0.06, dilate=8):
+                  cell=8, margin=0.06, dilate=8, fix_shared=True):
     """Projection-atlas texture in one call. Sets model.uvs and model.texture and returns the Atlas.
 
     colors: {tag: rgb} base colour of projected (painted) surfaces; tags not listed get tag_color(tag).
@@ -621,6 +732,10 @@ def texture_model(model, size=(512, 512), colors=None, flat=None, paint=None, gl
             projection (small parts: tyres, guns, propellers...). flat="all" puts every tag on swatches
             (smallest possible texture, no painting).
     paint:  optional fn(atlas, model) for camouflage / markings / panel lines (atlas.paint3d, fill...).
+            It may run more than once (see fix_shared): build its result from the atlas it is given only.
+    fix_shared: when paint cuts openings (atlas.cut_alpha to alpha 0), faces that share texels with another surface
+            and so come out opened where they should be closed (or closed where they should be open) get texels
+            of their own and the atlas is built again (Atlas.hijacked; at most 3 times). atlas.solo lists them.
     """
     tags = []
     for p in model.order:
@@ -628,25 +743,133 @@ def texture_model(model, size=(512, 512), colors=None, flat=None, paint=None, gl
             for t in sh.tags:
                 if t not in tags:
                     tags.append(t)
-    atlas = Atlas(size, cell=cell)
-    atlas.glass_tags = tuple(glass_tags); atlas.split_sides = split_sides
     if flat == "all":
         flat = {t: (colors or {}).get(t, tag_color(t)) for t in tags}
-    for t, c in (flat or {}).items():
-        atlas.set_flat(t, c)
-    atlas.collect(model)
-    atlas.layout(margin=margin)
-    atlas.rasterize()
-    for t in tags:
-        if t in atlas.flat_tags:
-            continue
-        atlas.fill([t], (colors or {}).get(t, tag_color(t)))
-    if paint is not None:
-        paint(atlas, model)
-    atlas.swatch_paint()
-    atlas.dilate(dilate)
+
+    def build(solo):
+        atlas = Atlas(size, cell=cell)
+        atlas.glass_tags = tuple(glass_tags); atlas.split_sides = split_sides
+        atlas.solo = dict(solo)
+        for t, c in (flat or {}).items():
+            atlas.set_flat(t, c)
+        atlas.collect(model)
+        atlas.layout(margin=margin)
+        atlas.rasterize()
+        for t in tags:
+            if t in atlas.flat_tags:
+                continue
+            atlas.fill([t], (colors or {}).get(t, tag_color(t)))
+        if paint is not None:
+            paint(atlas, model)
+        atlas.swatch_paint()
+        atlas.dilate(dilate)
+        return atlas
+
+    atlas = build({})
+    if fix_shared:
+        for _ in range(3):
+            hj = atlas.hijacked()
+            if not hj:
+                break
+            solo = dict(atlas.solo)
+            for key, name in hj.items():
+                solo[key] = name if key not in solo else f"{key[0]}#{key[1]}#{key[2]}"
+            atlas = build(solo)
     model.uvs = atlas.uvs()
     rgb = np.clip(atlas.img, 0, 255).astype(np.uint8)
     a = np.clip(np.round(atlas.alpha), 0, 255).astype(np.uint8)[..., None]
     model.texture = np.concatenate([rgb, a], 2)
     return atlas
+
+
+# ---------------------------------------------------------------------------
+# paint helper: parts hanging under an airframe
+# ---------------------------------------------------------------------------
+def _poly_area(Q):
+    n = np.zeros(3)
+    for i in range(len(Q)):
+        n += np.cross(Q[i], Q[(i + 1) % len(Q)])
+    return 0.5 * float(np.linalg.norm(n))
+
+
+def _vertical_hits(TT, pts, up=True):
+    """For each point: does the vertical ray from it (upward, or downward) meet one of the triangles TT (n, 3, 3)?"""
+    xz = TT[:, :, [0, 2]]
+    lo = xz.min(1); hi = xz.max(1)
+    out = np.zeros(len(pts), bool)
+    for i, p in enumerate(pts):
+        c = np.nonzero((lo[:, 0] <= p[0]) & (hi[:, 0] >= p[0]) & (lo[:, 1] <= p[2]) & (hi[:, 1] >= p[2]))[0]
+        if not len(c):
+            continue
+        A = xz[c, 0]; v0 = xz[c, 1] - A; v1 = xz[c, 2] - A; v2 = np.array([p[0], p[2]]) - A
+        d = v0[:, 0] * v1[:, 1] - v0[:, 1] * v1[:, 0]
+        ok = np.abs(d) > 1e-12
+        dd = np.where(ok, d, 1.0)
+        s = (v2[:, 0] * v1[:, 1] - v2[:, 1] * v1[:, 0]) / dd
+        t = (v0[:, 0] * v2[:, 1] - v0[:, 1] * v2[:, 0]) / dd
+        inside = ok & (s >= 0) & (t >= 0) & (s + t <= 1)
+        if not inside.any():
+            continue
+        Y = TT[c, :, 1]
+        y = Y[:, 0] + s * (Y[:, 1] - Y[:, 0]) + t * (Y[:, 2] - Y[:, 0])
+        out[i] = bool((inside & ((y > p[1] + 0.01) if up else (y < p[1] - 0.01))).any())
+    return out
+
+
+def hanging_shells(model, core_parts=("fuselage", "hull", "wing", "tail", "$wing_fold*"), tags=None, skip=(), share=0.6):
+    """Shells that hang under the airframe: floats and their pylons, wing-tip floats, fairings and spats, gear doors,
+    radiators... - at least `share` of their side and bottom area has the airframe straight above it and none of it
+    below, or they lie wholly below the lowest point of the main body. The airframe ('core') is the largest shell of
+    the first core part found among fuselage / hull, and every shell of the other core parts with at least 30 % of
+    that part's largest area. Struts and nacelles between a wing and the body under it are not hanging.
+    core_parts: part names; a name ending in '*' matches every part that starts with it ("$wing_fold*").
+    tags: only shells whose faces mostly carry these tags (e.g. the camouflaged skin, not flat-coloured stores).
+    Returns {(part, shell index)} - paint their sides with atlas.face_mask(shells, kinds=("side", "front"))."""
+    core, tris, body_min = set(), [], None
+    is_core = lambda p: any(p == c or (c.endswith("*") and p.startswith(c[:-1])) for c in core_parts)
+    body_part = next((p for p in ("fuselage", "hull") if p in model.parts and p in core_parts), None)
+    for pname in model.order:
+        if not is_core(pname):
+            continue
+        shells = model.parts[pname].shells
+        if not shells:
+            continue
+        areas = [sum(_poly_area(sh.V()[list(f)]) for f in sh.faces) for sh in shells]
+        big = max(areas)
+        for si, (sh, a) in enumerate(zip(shells, areas)):
+            if a >= (big if pname == body_part else 0.3 * big) - 1e-9:
+                core.add((pname, si))
+                P = sh.V()
+                for f in sh.faces:
+                    Q = P[list(f)]
+                    tris.extend(Q[[0, k, k + 1]] for k in range(1, len(Q) - 1))
+                if pname == body_part:
+                    body_min = float(P[:, 1].min())
+    if not tris:
+        return set()
+    TT = np.array(tris)
+    out = set()
+    for pname in model.order:
+        if pname in skip:
+            continue
+        for si, sh in enumerate(model.parts[pname].shells):
+            if (pname, si) in core:
+                continue
+            sel = [k for k, t in enumerate(sh.tags) if tags is None or t in tags]
+            if not sel or len(sel) < 0.5 * len(sh.faces):
+                continue
+            P = sh.V()
+            pts, w = [], []
+            for k in sel:
+                Q = P[list(sh.faces[k])]
+                n = face_normal(Q)
+                if n[1] > 0.69:          # faces looking up are seen from above: they keep the upper colour
+                    continue
+                pts.append(Q.mean(0) + n * 0.02); w.append(_poly_area(Q))
+            if not pts:
+                continue
+            pts = np.array(pts); w = np.array(w)
+            under = _vertical_hits(TT, pts, True) & ~_vertical_hits(TT, pts, False)
+            if (w * under).sum() >= share * w.sum() or (body_min is not None and P[:, 1].max() <= body_min + 0.02):
+                out.add((pname, si))
+    return out
