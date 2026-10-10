@@ -83,6 +83,7 @@ def main():
     print("floating detection ok")
     modern_kits()
     seethrough_and_shared_texels()
+    machinery_kit()
     print("ALL OK", tmp)
 
 
@@ -164,6 +165,45 @@ def seethrough_and_shared_texels():
     hs = hanging_shells(h, tags=("body",))
     assert ("float", 0) in hs and ("fin", 0) not in hs, hs
     print("see-through check / shared texels / hanging shells ok", {"open before": bad, "after": good})
+
+
+def machinery_kit():
+    from meshkit import machinery as mc
+    # running gear: nothing overlaps; wheels are dropped rather than squeezed
+    L = mc.crawler_layout(2.05, 0.68, 0.27, 0.11, 14, 0.07, 1)
+    assert mc.layout_overlaps(L, gap=0.03) == [] and len(L["wheels"]) < 14, L["wheels"]
+    # ram: stages from the stroke, leverage, mount search, exact joints
+    pivot, axis = (0.0, 1.0, 1.6), (1, 0, 0)
+    angles = [-80.0 * i / 24 for i in range(25)]
+    assert mc.ram_stages(1.0, 1.6) == (2, True) and mc.ram_stages(1.0, 6.0)[0] > 2
+    assert mc.ram_leverage((0, 1.0, 1.6), (0, 6.0, 1.6), pivot, axis, angles) < 1e-6     # through the hinge
+    best = mc.ram_mount_search(pivot, axis, angles, [(0, 1.05, z / 10) for z in range(-12, 10)],
+                               [(0, y / 4, 1.55) for y in range(12, 28)], min_arm=0.3)
+    assert best and best[0][2] == 2 and best[0][5] >= 0.3, best[:1]
+    m = mk.Model("rig")
+    m.add("$upper", mk.box(0, 0.85, 0, 1.9, 0.3, 3.3, tag="frame"))
+    m.add("$mast", mk.box(0, 4.75, 1.75, 0.4, 7.5, 0.3, tag="frame"))
+    b, a, n, lmin, lmax, arm = best[0]
+    parts = mc.ram(m, "$ram", b, a, 0.2, lmin, lmax)
+    joints = [mc.joint("$mast", pivot, axis, channel="mast", parent="$upper", factor=80.0, offset=-80.0)]
+    joints += mc.ram_joints(parts, "$upper", b, a, "$mast", axis)
+    poses = mc.sweep_poses({"mast": (0.0, 1.0)})
+    assert max(mc.ram_drift(joints, poses, [(parts[-1], a, "$mast")]).values()) < 1e-6
+    # outriggers: the pad stays up until the beam is out
+    mc.outriggers(m, mc.corner_mounts(1.3, -1.6, 0.95, 0.15), 0.9, 0.12, 1.4, 0.74, 0.2, 1.7, 1.8, parent="$upper")
+    oj = mc.outriggers(mk.Model("x"), mc.corner_mounts(1.3, -1.6, 0.95, 0.15), 0.9, 0.12, 1.4, 0.74, 0.2, 1.7, 1.8,
+                       parent="$upper")
+    mats = mc.solve(oj, {"outrigger": 0.5})
+    assert abs(mats["$outrigger_fl_leg"][1, 3] - mats["$outrigger_fl"][1, 3]) < 1e-9
+    # clamp jaws: hollow where the member passes, open with the channel
+    jj = mc.clamp_jaws(m, "$mast", 0.0, 2.35, 0.3, 0.1, 1.05, 1.25, lug_to=(0.12, 1.8))
+    closed = mc.posed(m, jj, {"steady": 0.0})
+    P = np.vstack([sh.V() for sh in closed.parts["$steady_l"].shells])
+    r = np.hypot(P[:, 0], P[:, 2] - 2.35)
+    assert r.min() > 0.2, r.min()
+    opened = mc.posed(m, jj, {"steady": 1.0})
+    assert np.vstack([sh.V() for sh in opened.parts["$steady_l"].shells])[:, 0].min() > P[:, 0].min() + 0.1
+    print("machinery kit ok", {"wheels": len(L["wheels"]), "ram": best[0][2:]})
 
 
 if __name__ == "__main__":
