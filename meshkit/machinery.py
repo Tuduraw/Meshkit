@@ -330,7 +330,8 @@ def ram(model, name, base, attach, r, lmin, lmax, tag="paint", rod_tag="chrome",
     n = stages or n
     parts = [name] + ["%s_s%d" % (name, i) for i in range(1, n)]
     if n == 2 and simple:
-        barrel = min(L0 * barrel_frac, lmin * 0.9)
+        # long enough that the rod is still inside it at full stroke (rod starts lmax - 0.95 lmin out)
+        barrel = min(max(L0 * barrel_frac, lmax - 0.85 * lmin), lmin * 0.9)
         model.add(parts[0], cylinder(base - u * r * 0.6, base + u * barrel, r, n=8, tag=tag))
         model.add(parts[0], cylinder(base + u * (barrel - 0.04), base + u * (barrel + 0.02), r * 1.12, n=8, tag=tag))
         model.add(parts[1], cylinder(base + u * max(L0 - lmin * 0.95, r), attach, r * 0.55, n=6, tag=rod_tag))
