@@ -510,6 +510,17 @@ def solve(joints, values, travel=0.0, crawlers=()):
             M[:3, 3] = ax * ((d_now - d_rest) * f + j.get("offset", 0.0))
         elif mode == "belt":
             M = _rot4(ax, f * travel + j.get("offset", 0.0), piv)
+        elif mode == "scissor" and j.get("channel"):
+            # scissor arm: turns by asin(value) - asin(offset) (modelled at channel 0)
+            rest = min(max(off, -1.0), 1.0)
+            M = _rot4(ax, math.degrees(math.asin(min(max(v, -1.0), 1.0)) - math.asin(rest)), piv)
+        elif mode == "show" and v < 0.999:
+            # hidden: shrunk into the pivot
+            T = np.eye(4)
+            T[:3, 3] = piv
+            Ti = np.eye(4)
+            Ti[:3, 3] = -piv
+            M = T @ np.diag([1e-3, 1e-3, 1e-3, 1.0]) @ Ti
         R = P @ M
         done[j["part"]] = R
         visiting.discard(j["part"])
