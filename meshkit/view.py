@@ -190,6 +190,27 @@ def sheet(model, views=("iso", "iso_rear", "left", "top", "front", "iso_below"),
     return R.contact_sheet(imgs, labels, cols=min(cols, len(imgs)), title=title)
 
 
+def states_sheet(model, states, views=("iso", "left", "front"), W=520, H=340, mode="texture", wire=False, title=None,
+                 skip=(), only=None, **kw):
+    """One row per visibility state [(label, skip_set, only_set_or_None)] (see vehicle.parse_states), the same
+    cameras in every row (framed on the whole model), so what hides behind wheels, tracks or skirts shows up."""
+    imgs, labels = [], []
+    for label, sk, on in states:
+        sk = set(sk) | set(skip or ())
+        if only is not None:
+            on = set(only) if on is None else set(on) & set(only)
+        for v in views:
+            cam_v = v
+            if isinstance(v, str):
+                cam_v = dict(camera(model, v, W, H, kw.get("fov", 32.0), zoom=kw.get("zoom", 1.0)), label=v)
+            imgs.append(render_view(model, cam_v, W, H, mode, wire, skip=sk, only=on, **kw))
+            labels.append(f"{label} | {v if isinstance(v, str) else v.get('label', 'custom')}")
+    if title is None:
+        s = model.summary()
+        title = f"{model.name}  tris={s['tris']}  states={len(states)}  mode={mode}"
+    return R.contact_sheet(imgs, labels, cols=len(views), title=title)
+
+
 def save(img, path):
     (img if isinstance(img, Image.Image) else Image.fromarray(img)).save(path)
     return path

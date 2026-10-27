@@ -18,6 +18,7 @@ ww2gen（vehicleaddonww2の生成スクリプト）で使ってきた汎用部�
 | 現代兵器用キット（0.3.0） | 直線の台形翼（公表値から翼弦を算出）、ノズルを内包する双発機の後部胴体、コックピットのくぼみ、引き込み脚の自動収納と脚収納部の膨らみ、戦車の車体側面形（傾斜角から）・足回り・履帯経路・張り出し付き砲塔・搭載モジュール、現代艦の傾斜壁の上部構造と艤装、墨入れなどテクスチャの書き込み、めり込み・公表寸法・標識位置の検査。手引きは `meshkit/AI_GUIDE.md` の6章、例は `examples/modern/` |
 | 透けの検査と開口の修正（0.5.0） | 64視点から、面の裏側（＝背景）が見える画素を部品と位置ごとに数える `seethrough`（CLI・MCP・`run --seethrough`）。開口（不透明度0の穴）とテクセルを共有して誤って開く／開かない面を、`texture_model` が自動で専用の領域に移す（`fix_shared`、既定で有効）。機体の下に吊るされた部品を探す `hanging_shells`（側面を下面色で塗るため）。手引きは `meshkit/AI_GUIDE.md` の8章 |
 | 建設機械用キット（0.6.0） | 重ならない履帯の配置（誘導輪・起動輪・転輪・上部転輪・経路）と履帯一式、油圧シリンダー（段数・てこ・取付位置の探索・どの姿勢でも外れない関節）、斜めに張り出すアウトリガー、左右に開く振れ止め、関節の姿勢計算と、姿勢の総当たりでの浮き・めり込み・シリンダーのずれの検査 `machinery`。手引きは `meshkit/AI_GUIDE.md` の9章、例は `examples/machinery/crawler_rig.py` |
+| 車両JSONと塗り分けの検査（0.7.0） | tudursvehiclemod の車両JSONの履帯（`crawler_tracks`）をmodと同じ配置で並べたプレビュー・検査（`render/seethrough/clash --json`）、履帯が車体などの閉じたシェルの中を通る箇所の検出 `clash`、離れた場所にある見える面どうしが同じテクセルを使っている箇所の検出 `texshare`（重なった転輪、転輪と車体側面など）、部品の表示状態を変えて並べる `render --states`、`--parts/--skip` のワイルドカード指定。手引きは `meshkit/AI_GUIDE.md` の11章 |
 | ロボット用キット（0.4.0、0.4.1で追加） | 4つのデザイン言語の断面（丸い五角形、管と格子桁、稜線のある六角形、鋳造の超楕円）、斜材付きの桁と支柱で浮かせた別体の装甲板（0.4.1）、装甲板・スカート、関節の回転（変形の姿勢づくり）、充填率・正面幅/側面奥行き・脚の寸法の数値化。手引きは `meshkit/AI_GUIDE.md` の7章、例は `examples/mech/concept_legs.py` |
 | 窓口 | コマンドライン（`python -m meshkit ...`）と、MCPサーバー（`python -m meshkit.mcp_server`） |
 
@@ -74,6 +75,9 @@ python -m meshkit info model.obj
 python -m meshkit convert model.obj model.glb --texture model.png
 python -m meshkit diff old.obj new.obj
 python -m meshkit seethrough model.obj --texture model.png -o seethrough.png
+python -m meshkit render tank.obj --texture tank.png --json tank.json --states "all;-$track_*,$wheel_*"
+python -m meshkit clash tank.obj --json tank.json
+python -m meshkit texshare tank.obj --texture tank.png --parts "$wheel_*" -o texshare.png
 ```
 
 `seethrough` は、面の裏側が見える画素（`open`）とガラス越しに見える画素（`glass`）の数、その部品と位置をJSONで出し、`-o` で最も悪い視点の画像（裏面＝マゼンタ、ガラス越し＝シアン）を書き出します。目標は `open` が0〜3画素です。
@@ -147,6 +151,8 @@ meshkit/
     geom.py        形状（Shell / Part / Model、プリミティブ）
     check.py       メッシュ検査と report()
     seethrough.py  透けの検査（面の裏側が見える画素。0.5.0）
+    texshare.py    離れた見える面どうしのテクセル共有の検査（0.7.0）
+    vehicle.py     車両JSON（履帯の配置）、clash、表示状態の指定（0.7.0）
     attach.py      接触判定（浮き部品）
     texture.py     投影アトラスと texture_model()
     render.py      ソフトウェア描画
@@ -173,6 +179,11 @@ meshkit/
 
 ## 更新履歴
 
+- 0.7.0（2026-10-27）：vehicleaddonww2 の戦車の修正（転輪の塗装の誤り、車体側面の不要な箱、Panther の履帯と車体の重なり）で使った検査を追加しました。既存の関数の出力は変えていません。
+  - 追加したモジュール：`vehicle`（`load_json`、`select`、`track_placements`、`bake_tracks`、`clash`、`parse_states`）、`texshare`（`check`、`summary`、`sheet`）
+  - CLI：`clash`、`texshare` を追加。`render` に `--json`・`--states`、`seethrough` に `--json` を追加。`--parts`・`--skip` はワイルドカード（`$wheel_*`）を受け付けます
+  - `render.render(return_depth=True)`（深度バッファも返す）、`view.states_sheet()`
+  - `AI_GUIDE.md` に11章「戦車の足回りの検査」を追加
 - 0.5.0（2026-10-09）：透けの検査と、開口のテクセル共有の修正を追加しました。vehicleaddonww2 の航空機59機の修正（主翼付け根などで面の裏側が見えていた件と、機体下部の部品の塗り分け）で得た知見です。動作確認キットの134項目は完全一致のままです（確認用モデルは開口を使っていないため、出力は変わりません）。
   - 追加したモジュール：`seethrough`（`check`、`sheet`、`summary`）。CLI の `seethrough` と `run --seethrough`、MCP の `seethrough` ツールと `run_script` の `seethrough` を追加
   - `texture`：`texture_model(fix_shared=True)`、`Atlas.hijacked()`・`solo`・`fmap`・`face_mask()`・`Region.px_to_ab()`、`hanging_shells()`

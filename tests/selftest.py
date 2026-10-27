@@ -84,6 +84,7 @@ def main():
     modern_kits()
     seethrough_and_shared_texels()
     machinery_kit()
+    vehicle_checks()
     print("ALL OK", tmp)
 
 
@@ -205,6 +206,41 @@ def machinery_kit():
     assert np.vstack([sh.V() for sh in opened.parts["$steady_l"].shells])[:, 0].min() > P[:, 0].min() + 0.1
     print("machinery kit ok", {"wheels": len(L["wheels"]), "ram": best[0][2:]})
 
+
+
+def vehicle_checks():
+    """v0.7: crawler tracks placed from the vehicle JSON as the mod does, a track running through the hull, two
+    visible faces in different places that share texels."""
+    from meshkit import vehicle, texshare
+    m = mk.Model("t"); m.add("hull", mk.box(0, 1.0, 0, 1.6, 0.8, 4.0, tag="body"))
+    m.add("$track_l", mk.box(1.3, 0, 0, 0.4, 0.05, 0.2, tag="track"))
+    path = [{"y": 0.1, "z": 2.0}, {"y": 0.1, "z": -2.0}, {"y": 0.9, "z": -2.0}, {"y": 0.9, "z": 2.0}]
+    js = {"crawler_tracks": [{"part": "$track_l", "path": path, "link_spacing": 0.25}]}
+    pl = vehicle.track_placements(js["crawler_tracks"][0])
+    assert len(pl) == 38, len(pl)
+    m2 = vehicle.bake_tracks(m, js)
+    assert len(m2.parts["$track_l"].shells) == 38 and len(m.parts["$track_l"].shells) == 1
+    assert vehicle.clash(m2, ["$track_l"], ["hull"])["$track_l"]["inside"] == 0
+    m3 = mk.Model("t3"); m3.add("hull", mk.box(0.6, 1.0, 0, 1.6, 0.8, 4.0, tag="body"))
+    m3.add("$track_l", mk.box(1.0, 0, 0, 0.4, 0.05, 0.2, tag="track"))
+    c = vehicle.clash(vehicle.bake_tracks(m3, js), ["$track_l"], ["hull"])["$track_l"]
+    assert c["inside"] > 0.1 and c["hits"][0]["part"] == "hull", c
+    assert vehicle.select(["$wheel_l1", "$wheel_r1", "hull"], "$wheel_*") == ["$wheel_l1", "$wheel_r1"]
+    st = vehicle.parse_states("all;-$track_*;=hull", m3.order)
+    assert st[1][1] == {"$track_l"} and st[2][2] == {"hull"}
+    # two wheels of one part side by side in X, the inner one half visible behind the outer one: same side-view texels
+    w = mk.Model("w")
+    w.add("$wheels", mk.cylinder((0.9, 0.5, 0.0), (1.1, 0.5, 0.0), 0.5, n=12, tag="wheel"))
+    w.add("$wheels", mk.cylinder((0.6, 0.5, 0.6), (0.8, 0.5, 0.6), 0.5, n=12, tag="wheel"))
+    w.uvs = {}                                       # a plain side projection (z, y), as a projection atlas does
+    for si, sh in enumerate(w.parts["$wheels"].shells):
+        V = sh.V()
+        for fi, f in enumerate(sh.faces):
+            w.uvs[("$wheels", si, fi)] = [((V[i][2] + 1.0) / 2.5, V[i][1] / 1.2) for i in f]
+    w.texture = np.full((128, 128, 4), 255, np.uint8)
+    r = texshare.check(w, 24, 200)
+    assert r["texels"] > 0 and set(r["by_part"]) == {"$wheels"}, texshare.summary(r)
+    print("vehicle json / clash / texshare ok", {"links": len(pl), "inside": c["inside"], "shared": r["texels"]})
 
 if __name__ == "__main__":
     main()

@@ -7,6 +7,11 @@
         see-through check (report["seethrough"], <name>_seethrough.png).
   render FILE [-o PNG] [--views iso,left,top] [--mode texture|parts|solid|tags|orientation|xray] [--wire]
         [--size 520x340] [--cols 3] [--texture PNG] [--axes native|blender] [--parts a,b] [--skip a,b] [--zoom 1]
+        [--json VEHICLE.json] [--states 'all;-$track_*,$wheel_*;=hull']
+        --parts/--skip take glob patterns ($wheel_*). --json: a tudursvehiclemod vehicle JSON - the crawler tracks
+        are placed around their path as in game. --states: one row of the views per visibility state ('all',
+        '-patterns' hides, '=patterns' or 'patterns' shows only those) - for checking what lies behind wheels,
+        tracks, skirts or the parts in front.
   check FILE [--no-contacts] [--texture PNG] [--axes ...]       closed-mesh / contact report (JSON)
   info FILE [--axes ...]                                         sizes, parts, triangle counts (JSON)
   convert IN OUT [--texture PNG] [--axes-in ...] [--axes-out ...]  obj <-> glb
@@ -16,6 +21,13 @@
   seethrough FILE [--texture PNG] [--axes ...] [--directions 32] [--res 360] [--skip a,b] [-o PNG]
         pixels where the back of a surface is in view (a hole, an opening with nothing behind it, a face that
         shares the texels of an opening...), by part and place (JSON); -o: the worst views, magenta / cyan
+        (--json VEHICLE.json places the crawler tracks first)
+  texshare FILE --texture PNG [--parts ...] [--skip ...] [--json VEHICLE.json] [--tol 0.03] [--views 24] [-o PNG]
+        visible surfaces that sample the same texels from different places (an interleaved wheel row painted with
+        the wheel behind it, a mudguard with the track's picture...) - by part pair (JSON); -o: the texture with the
+        conflicting texels in magenta
+  clash FILE --json VEHICLE.json [--a '$track_*'] [--b hull] [--samples 2]
+        where parts (default: the crawler tracks placed as in game) run inside closed shells of others (JSON)
 """
 import argparse
 import json
@@ -40,6 +52,14 @@ def _load(path, texture=None, axes="native"):
     else:
         raise SystemExit(f"unsupported file: {path}")
     return m
+
+
+def _with_json(m, path):
+    """Place the crawler tracks of a tudursvehiclemod vehicle JSON (no-op without one)."""
+    if not path:
+        return m
+    from . import vehicle
+    return vehicle.bake_tracks(m, vehicle.load_json(path))
 
 
 def _size(s):
@@ -141,7 +161,7 @@ def main(argv=None):
     r.add_argument("--views", default="iso,iso_rear,left,top,front,iso_below"); r.add_argument("--mode", default="texture")
     r.add_argument("--wire", action="store_true"); r.add_argument("--size", default="520x340"); r.add_argument("--cols", type=int, default=3)
     r.add_argument("--texture"); r.add_argument("--axes", default="native"); r.add_argument("--parts"); r.add_argument("--skip")
-    r.add_argument("--zoom", type=float, default=1.0)
+    r.add_argument("--zoom", type=float, default=1.0); r.add_argument("--json"); r.add_argument("--states")
 
     c = sub.add_parser("check"); c.add_argument("file"); c.add_argument("--no-contacts", action="store_true")
     c.add_argument("--texture"); c.add_argument("--axes", default="native")
@@ -159,7 +179,15 @@ def main(argv=None):
 
     t = sub.add_parser("seethrough"); t.add_argument("file"); t.add_argument("--texture"); t.add_argument("--axes", default="native")
     t.add_argument("--directions", type=int, default=32); t.add_argument("--res", type=int, default=360)
-    t.add_argument("--skip"); t.add_argument("-o", "--out")
+    t.add_argument("--skip"); t.add_argument("-o", "--out"); t.add_argument("--json")
+
+    x = sub.add_parser("texshare"); x.add_argument("file"); x.add_argument("--texture"); x.add_argument("--axes", default="native")
+    x.add_argument("--parts"); x.add_argument("--skip"); x.add_argument("--json"); x.add_argument("--tol", type=float, default=0.03)
+    x.add_argument("--views", type=int, default=24); x.add_argument("--res", type=int, default=300)
+    x.add_argument("--no-mirror", action="store_true"); x.add_argument("-o", "--out")
+
+    k = sub.add_parser("clash"); k.add_argument("file"); k.add_argument("--json", required=True); k.add_argument("--axes", default="native")
+    k.add_argument("--a"); k.add_argument("--b"); k.add_argument("--samples", type=int, default=2)
 
     ns = ap.parse_args(argv)
     from . import check, view, io_obj, io_gltf
@@ -171,15 +199,20 @@ def main(argv=None):
         if ns.strict and not rep["ok"]:
             sys.exit(1)
     elif ns.cmd == "render":
-        m = _load(ns.file, ns.texture, ns.axes)
+        from . import vehicle
+        m = _with_json(_load(ns.file, ns.texture, ns.axes), ns.json)
         out = ns.out or os.path.splitext(ns.file)[0] + "_preview.png"
         W, H = _size(ns.size)
         kw = {}
         if ns.parts:
-            kw["only"] = set(_views(ns.parts))
+            kw["only"] = set(vehicle.select(m.order, ns.parts))
         if ns.skip:
-            kw["skip"] = set(_views(ns.skip))
-        view.sheet(m, _views(ns.views), W, H, ns.mode, ns.wire, cols=ns.cols, zoom=ns.zoom, **kw).save(out)
+            kw["skip"] = set(vehicle.select(m.order, ns.skip))
+        if ns.states:
+            view.states_sheet(m, vehicle.parse_states(ns.states, m.order), _views(ns.views), W, H, ns.mode, ns.wire,
+                              zoom=ns.zoom, **kw).save(out)
+        else:
+            view.sheet(m, _views(ns.views), W, H, ns.mode, ns.wire, cols=ns.cols, zoom=ns.zoom, **kw).save(out)
         print(out)
     elif ns.cmd == "check":
         m = _load(ns.file, ns.texture, ns.axes)
@@ -224,14 +257,37 @@ def main(argv=None):
                     out["changed_parts"][p] = {"tris": [ta, tb], "bbox_shift": round(dv, 4)}
         print(_json(out))
     elif ns.cmd == "seethrough":
-        from . import seethrough
-        m = _load(ns.file, ns.texture, ns.axes)
-        rep = seethrough.check(m, ns.directions, ns.res, skip=set(_views(ns.skip)) if ns.skip else ())
+        from . import seethrough, vehicle
+        m = _with_json(_load(ns.file, ns.texture, ns.axes), ns.json)
+        rep = seethrough.check(m, ns.directions, ns.res, skip=set(vehicle.select(m.order, ns.skip)) if ns.skip else ())
         out = seethrough.summary(rep)
         if ns.out and rep["worst"]:
             seethrough.sheet(m, rep).save(ns.out)
             out["image"] = ns.out
         print(_json(out))
+    elif ns.cmd == "texshare":
+        from . import texshare, vehicle
+        m = _with_json(_load(ns.file, ns.texture, ns.axes), ns.json)
+        skip = set(vehicle.select(m.order, ns.skip)) if ns.skip else set()
+        if ns.parts:
+            keep = set(vehicle.select(m.order, ns.parts))
+            only = keep
+        else:
+            only = None
+        rep = texshare.check(m, ns.views, ns.res, skip=skip, tol=ns.tol, mirror_ok=not ns.no_mirror, only=only)
+        out = texshare.summary(rep)
+        if ns.out:
+            texshare.sheet(m, rep).save(ns.out)
+            out["image"] = ns.out
+        print(_json(out))
+    elif ns.cmd == "clash":
+        from . import vehicle
+        m0 = _load(ns.file, axes=ns.axes)
+        js = vehicle.load_json(ns.json)
+        m = vehicle.bake_tracks(m0, js)
+        a = vehicle.select(m.order, ns.a) if ns.a else [t["part"] for t in js.get("crawler_tracks", []) if t["part"] in m.parts]
+        b = vehicle.select(m.order, ns.b) if ns.b else [p for p in m.order if p not in a and not p.startswith("$")]
+        print(_json(vehicle.clash(m, a, b, ns.samples)))
     elif ns.cmd == "silhouette":
         from . import silhouette
         m = _load(ns.file, axes=ns.axes)

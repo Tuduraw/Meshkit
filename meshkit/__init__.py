@@ -3,7 +3,7 @@
 Build closed low-poly meshes from code, check them, texture them, preview them in software and
 read/write OBJ and glTF. Needs only numpy and Pillow (opencv optional for silhouettes).
 """
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 from .geom import (Model, Part, Shell, V, rot_x, rot_y, rot_z, rot_axis, loft, box, prism, cylinder, lathe,  # noqa: F401
                    ellipsoid, extrude_xz, extrude_zy, extrude_xy, ring_superellipse, ring_on_axis, wing, fin,

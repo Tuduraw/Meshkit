@@ -20,7 +20,7 @@ def look_at(eye, target, up=(0, 1, 0)):
 
 
 def render(tris, tex, W=640, H=420, eye=(10, 6, 10), target=(0, 1, 0), fov=35.0, ortho=None, bg=(200, 214, 228), cull=True,
-           solid=(), ids=None, backface=None, return_ids=False, up=(0, 1, 0)):
+           solid=(), ids=None, backface=None, return_ids=False, up=(0, 1, 0), return_depth=False):
     """tris: list of (P(3x3), UV(3x2)) or (P, None, rgb) in model space. tex: HxWx3/4 uint8 (may be None
     when every triangle carries a flat colour).
     solid: extra flat-coloured triangles [(P(3x3), rgb)] (e.g. a stand-in for the seated player).
@@ -28,7 +28,9 @@ def render(tris, tex, W=640, H=420, eye=(10, 6, 10), target=(0, 1, 0), fov=35.0,
     ids: optional per-triangle integer (e.g. the polygon id) written to an id buffer; return_ids=True
     returns (image, idbuf) - used for wireframe overlays of polygon outlines.
     backface: rgb - with cull=False, back faces are painted this colour instead (shows inverted
-    faces and holes, like Blender's face-orientation overlay)."""
+    faces and holes, like Blender's face-orientation overlay).
+    return_depth: with return_ids, also return the depth buffer (camera-space distance along the view axis,
+    inf = background): (image, idbuf, zbuf)."""
     tris = list(tris) + [(np.asarray(P, float), None, np.asarray(c, np.float32)) for P, c in solid]
     if ids is not None:
         ids = list(ids) + [-2] * len(solid)
@@ -129,6 +131,8 @@ def render(tris, tex, W=640, H=420, eye=(10, 6, 10), target=(0, 1, 0), fov=35.0,
         if idbuf is not None:
             idbuf[y0:y1 + 1, x0:x1 + 1][vis] = ids[ti] if ids is not None else ti
     out = np.clip(img, 0, 255).astype(np.uint8)
+    if return_ids and return_depth:
+        return out, idbuf, zbuf
     return (out, idbuf) if return_ids else out
 
 
